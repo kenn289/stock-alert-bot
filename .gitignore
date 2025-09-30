@@ -1,2 +1,2 @@
-# Ignore config file with sensitive keys
 config.py
+*.env
