@@ -1,3 +1,4 @@
+import os
 import time
 import logging
 from datetime import datetime, timezone
@@ -5,22 +6,49 @@ import yfinance as yf
 import pandas as pd
 import tweepy
 from indicators import compute_rsi, compute_macd, detect_macd_cross
-import config as cfg
 
+# Try to import local config
+try:
+    import config as cfg
+except ImportError:
+    cfg = None
+
+# Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
 
-# Twitter v2 Client
+# Twitter credentials: prefer environment variables, fallback to config.py
+TWITTER_API_KEY = os.environ.get("TWITTER_API_KEY") or (cfg.TWITTER_API_KEY if cfg else None)
+TWITTER_API_SECRET = os.environ.get("TWITTER_API_SECRET") or (cfg.TWITTER_API_SECRET if cfg else None)
+TWITTER_ACCESS_TOKEN = os.environ.get("TWITTER_ACCESS_TOKEN") or (cfg.TWITTER_ACCESS_TOKEN if cfg else None)
+TWITTER_ACCESS_TOKEN_SECRET = os.environ.get("TWITTER_ACCESS_TOKEN_SECRET") or (cfg.TWITTER_ACCESS_TOKEN_SECRET if cfg else None)
+TWITTER_BEARER_TOKEN = os.environ.get("TWITTER_BEARER_TOKEN") or (cfg.TWITTER_BEARER_TOKEN if cfg else None)
+
+# Check keys
+if not all([TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_TOKEN_SECRET, TWITTER_BEARER_TOKEN]):
+    logger.error("Twitter API keys are missing! Set them in config.py or environment variables.")
+    exit(1)
+
+# Twitter client
 client = tweepy.Client(
-    bearer_token=cfg.TWITTER_BEARER_TOKEN,
-    consumer_key=cfg.TWITTER_API_KEY,
-    consumer_secret=cfg.TWITTER_API_SECRET,
-    access_token=cfg.TWITTER_ACCESS_TOKEN,
-    access_token_secret=cfg.TWITTER_ACCESS_TOKEN_SECRET
+    bearer_token=TWITTER_BEARER_TOKEN,
+    consumer_key=TWITTER_API_KEY,
+    consumer_secret=TWITTER_API_SECRET,
+    access_token=TWITTER_ACCESS_TOKEN,
+    access_token_secret=TWITTER_ACCESS_TOKEN_SECRET
 )
 
+# Tickes and settings
+tickers = cfg.TICKERS.copy() if cfg else []
+RSI_OVERBOUGHT = getattr(cfg, "RSI_OVERBOUGHT", 70)
+RSI_OVERSOLD = getattr(cfg, "RSI_OVERSOLD", 30)
+CHECK_INTERVAL_SECONDS = getattr(cfg, "CHECK_INTERVAL_SECONDS", 300)
+BATCH_SIZE = getattr(cfg, "BATCH_SIZE", 50)
+YFINANCE_PERIOD = getattr(cfg, "YFINANCE_PERIOD", "1mo")
+YFINANCE_INTERVAL = getattr(cfg, "YFINANCE_INTERVAL", "1h")
+TWEET_DELAY_SECONDS = getattr(cfg, "TWEET_DELAY_SECONDS", 5)
+
 last_alerts = {}
-tickers = cfg.TICKERS.copy()
 
 def fetch_data_batch(tickers_batch):
     """Fetch data for multiple tickers, remove delisted ones."""
@@ -30,8 +58,8 @@ def fetch_data_batch(tickers_batch):
         try:
             df = yf.download(
                 tickers=ticker,
-                period=cfg.YFINANCE_PERIOD,
-                interval=cfg.YFINANCE_INTERVAL,
+                period=YFINANCE_PERIOD,
+                interval=YFINANCE_INTERVAL,
                 progress=False,
                 threads=False,
                 auto_adjust=True
@@ -70,16 +98,16 @@ def analyze_ticker(ticker, df):
     sent = False
 
     # RSI alerts
-    if rsi_latest <= cfg.RSI_OVERSOLD:
+    if rsi_latest <= RSI_OVERSOLD:
         key = f"{ticker}_rsi_oversold"
         if last_alerts.get(key) != 'sent':
-            msg_parts.append(f"🔔 RSI = {rsi_latest:.1f} (Oversold ≤ {cfg.RSI_OVERSOLD}) → Possible Buy")
+            msg_parts.append(f"🔔 RSI = {rsi_latest:.1f} (Oversold ≤ {RSI_OVERSOLD}) → Possible Buy")
             last_alerts[key] = 'sent'
             sent = True
-    elif rsi_latest >= cfg.RSI_OVERBOUGHT:
+    elif rsi_latest >= RSI_OVERBOUGHT:
         key = f"{ticker}_rsi_overbought"
         if last_alerts.get(key) != 'sent':
-            msg_parts.append(f"⚠️ RSI = {rsi_latest:.1f} (Overbought ≥ {cfg.RSI_OVERBOUGHT}) → Possible Sell")
+            msg_parts.append(f"⚠️ RSI = {rsi_latest:.1f} (Overbought ≥ {RSI_OVERBOUGHT}) → Possible Sell")
             last_alerts[key] = 'sent'
             sent = True
     else:
@@ -121,12 +149,10 @@ def post_tweet(msg):
 
 def main_loop():
     logger.info("Starting Stock Alert Bot (Twitter)...")
-    batch_size = cfg.BATCH_SIZE
-
     while tickers:
         try:
-            for i in range(0, len(tickers), batch_size):
-                batch = tickers[i:i + batch_size]
+            for i in range(0, len(tickers), BATCH_SIZE):
+                batch = tickers[i:i + BATCH_SIZE]
                 logger.info(f"Processing batch: {batch}")
                 df_batch = fetch_data_batch(batch)
 
@@ -136,14 +162,14 @@ def main_loop():
                     msg = analyze_ticker(ticker, df_batch[ticker])
                     if msg:
                         post_tweet(msg)
-                        time.sleep(getattr(cfg, "TWEET_DELAY_SECONDS", 5))  # configurable delay
+                        time.sleep(TWEET_DELAY_SECONDS)
 
-            logger.info(f"Sleeping {cfg.CHECK_INTERVAL_SECONDS}s before next check...")
-            time.sleep(cfg.CHECK_INTERVAL_SECONDS)
+            logger.info(f"Sleeping {CHECK_INTERVAL_SECONDS}s before next check...")
+            time.sleep(CHECK_INTERVAL_SECONDS)
 
         except Exception as e:
             logger.exception(f"Error in main loop: {e}")
-            time.sleep(cfg.CHECK_INTERVAL_SECONDS)
+            time.sleep(CHECK_INTERVAL_SECONDS)
 
     logger.info("No tickers left to monitor. Exiting bot.")
 
